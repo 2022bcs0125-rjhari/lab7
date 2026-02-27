@@ -29,12 +29,26 @@ def root():
 
 @app.post("/predict")
 def predict(data: WineInput):
-    X = np.array(data.features).reshape(1, -1)
-    prediction = model.predict(X)[0]
+    features = np.array([[
+        data.fixed_acidity,
+        data.volatile_acidity,
+        data.citric_acid,
+        data.residual_sugar,
+        data.chlorides,
+        data.free_sulfur_dioxide,
+        data.total_sulfur_dioxide,
+        data.density,
+        data.pH,
+        data.sulphates,
+        data.alcohol
+    ]])
+
+    prediction = model.predict(features)[0]
 
     return {
         "name": "R J Hari",
         "roll_no": "2022BCS0125",
         "wine_quality": int(round(prediction))
     }
+
 
