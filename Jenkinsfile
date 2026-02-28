@@ -81,14 +81,12 @@ pipeline {
                         def curMSE = env.CUR_MSE.toFloat()
                         def bestMSE = BEST_MSE_VAL.toFloat()
 
-                        echo "Comparing model performance..."
-
                         if (curR2 > bestR2 && curMSE < bestMSE) {
                             env.BUILD_DOCKER = "true"
-                            echo "Model improved. Docker build will proceed."
+                            echo "Model improved. Proceeding to build."
                         } else {
                             env.BUILD_DOCKER = "false"
-                            echo "Model NOT improved. Skipping Docker build."
+                            echo "Model not improved. Skipping Docker build."
                         }
                     }
                 }
@@ -99,9 +97,7 @@ pipeline {
         // Stage 6: Build Docker Image
         // =========================
         stage('Build Docker Image') {
-            when {
-                expression { env.BUILD_DOCKER == "true" }
-            }
+            when { expression { env.BUILD_DOCKER == "true" } }
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-creds',
@@ -121,47 +117,33 @@ pipeline {
         // Stage 7: Push Docker Image
         // =========================
         stage('Push Docker Image') {
-            when {
-                expression { env.BUILD_DOCKER == "true" }
-            }
+            when { expression { env.BUILD_DOCKER == "true" } }
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-creds',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
-                )]) {
-                    sh '''
-                    docker push $DOCKER_USER/wine-infer-jenkins:${BUILD_NUMBER}
-                    docker push $DOCKER_USER/wine-infer-jenkins:latest
-                    '''
-                }
+                sh '''
+                docker push 2022bcs0125rjhari/wine-infer-jenkins:${BUILD_NUMBER}
+                docker push 2022bcs0125rjhari/wine-infer-jenkins:latest
+                '''
             }
         }
 
         // =========================
         // Stage 8: Pull Latest Image
         // =========================
-        stage('Pull Latest Image for Validation') {
-            when {
-                expression { env.BUILD_DOCKER == "true" }
-            }
+        stage('Pull Latest Image') {
+            when { expression { env.BUILD_DOCKER == "true" } }
             steps {
-                sh '''
-                docker pull $DOCKER_IMAGE:latest
-                '''
+                sh 'docker pull 2022bcs0125rjhari/wine-infer-jenkins:latest'
             }
         }
 
         // =========================
         // Stage 9: Run Container
         // =========================
-        stage('Run Container for Validation') {
-            when {
-                expression { env.BUILD_DOCKER == "true" }
-            }
+        stage('Run Container') {
+            when { expression { env.BUILD_DOCKER == "true" } }
             steps {
                 sh '''
-                docker run -d -p 8000:8000 --name $CONTAINER_NAME $DOCKER_IMAGE:latest
+                docker run -d -p 8000:8000 --name $CONTAINER_NAME 2022bcs0125rjhari/wine-infer-jenkins:latest
                 '''
             }
         }
@@ -170,9 +152,7 @@ pipeline {
         // Stage 10: Wait for API Readiness
         // =========================
         stage('Wait for API Readiness') {
-            when {
-                expression { env.BUILD_DOCKER == "true" }
-            }
+            when { expression { env.BUILD_DOCKER == "true" } }
             steps {
                 script {
                     timeout(time: 60, unit: 'SECONDS') {
@@ -189,17 +169,17 @@ pipeline {
         }
 
         // =========================
-        // Stage 11: Valid Inference Test
+        // Stage 11: Validate Inference
         // =========================
-        stage('Valid Inference Test') {
-            when {
-                expression { env.BUILD_DOCKER == "true" }
-            }
+        stage('Validate Inference') {
+            when { expression { env.BUILD_DOCKER == "true" } }
             steps {
                 script {
-                    def response = sh(
+
+                    // ---- CASE 1: Valid Input ----
+                    def result = sh(
                         script: """
-                        curl -s -X POST "$API_URL/predict" \
+                        curl -s -w "\\n%{http_code}" -X POST "$API_URL/predict" \
                         -H "Content-Type: application/json" \
                         -d '{
                             "fixed_acidity":7.4,
@@ -218,27 +198,36 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "API Response: ${response}"
+                    def parts = result.split("\\n")
+                    def body = parts[0]
+                    def status = parts[1]
 
-                    def json = readJSON text: response
+                    if (status != "200") {
+                        error("Valid request failed with status ${status}")
+                    }
+
+                    def json = readJSON text: body
 
                     if (!json.containsKey("wine_quality")) {
-                        error("wine_quality field missing!")
+                        error("wine_quality missing in response")
                     }
-                }
-            }
-        }
 
-        // =========================
-        // Stage 12: Invalid Inference Test
-        // =========================
-        stage('Invalid Inference Test') {
-            when {
-                expression { env.BUILD_DOCKER == "true" }
-            }
-            steps {
-                script {
-                    def status = sh(
+                    def quality = json.wine_quality
+
+                    if (!(quality instanceof Number)) {
+                        error("wine_quality not numeric")
+                    }
+
+                    quality = quality as double
+
+                    if (quality < 0 || quality > 10) {
+                        error("wine_quality out of valid range")
+                    }
+
+                    echo "Valid inference test passed."
+
+                    // ---- CASE 2: Invalid Input ----
+                    def badStatus = sh(
                         script: """
                         curl -s -o /dev/null -w "%{http_code}" \
                         -X POST "$API_URL/predict" \
@@ -248,22 +237,20 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "Invalid Request Status: ${status}"
-
-                    if (status == "200") {
-                        error("Invalid request should not return 200!")
+                    if (badStatus == "200") {
+                        error("Invalid input incorrectly returned 200")
                     }
+
+                    echo "Invalid input test passed."
                 }
             }
         }
 
         // =========================
-        // Stage 13: Stop Container
+        // Stage 12: Stop Container
         // =========================
-        stage('Stop Validation Container') {
-            when {
-                expression { env.BUILD_DOCKER == "true" }
-            }
+        stage('Stop Container') {
+            when { expression { env.BUILD_DOCKER == "true" } }
             steps {
                 sh '''
                 docker stop $CONTAINER_NAME || true
@@ -271,7 +258,6 @@ pipeline {
                 '''
             }
         }
-
     }
 
     post {
