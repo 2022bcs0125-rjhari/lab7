@@ -48,7 +48,8 @@ def predict(data: WineInput):
     return {
         "name": "R J Hari",
         "roll_no": "2022BCS0125",
-        "wine_quality": int(round(prediction))
+        "quality": int(round(prediction))
     }
+
 
 
