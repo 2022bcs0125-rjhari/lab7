@@ -1,0 +1,155 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = "2022bcs0125rjhari/wine-infer-jenkins:latest"
+        CONTAINER_NAME = "wine-validation"
+        PORT = "8000"
+    }
+
+    stages {
+
+        // =========================
+        // Stage 1: Pull Image
+        // =========================
+        stage('Pull Image') {
+            steps {
+                echo "Pulling Docker image..."
+                sh 'docker pull $IMAGE_NAME'
+            }
+        }
+
+        // =========================
+        // Stage 2: Run Container
+        // =========================
+        stage('Run Container') {
+            steps {
+                echo "Starting container..."
+                sh '''
+                docker run -d -p 8000:8000 --name $CONTAINER_NAME $IMAGE_NAME
+                '''
+            }
+        }
+
+        // =========================
+        // Stage 3: Wait for Service Readiness
+        // =========================
+        stage('Wait for Service Readiness') {
+            steps {
+                script {
+                    echo "Checking API readiness..."
+                    def retries = 12
+                    def ready = false
+
+                    for (int i = 0; i < retries; i++) {
+
+                        def status = sh(
+                            script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/docs || true",
+                            returnStdout: true
+                        ).trim()
+
+                        if (status == "200") {
+                            echo "API is ready!"
+                            ready = true
+                            break
+                        }
+
+                        sleep 5
+                    }
+
+                    if (!ready) {
+                        error("API did not start within timeout")
+                    }
+                }
+            }
+        }
+
+        // =========================
+        // Stage 4: Send Valid Inference Request
+        // =========================
+        stage('Send Valid Inference Request') {
+            steps {
+                script {
+                    echo "Sending valid inference request..."
+
+                    def result = sh(
+                        script: "curl -s -w '\\n%{http_code}' -X POST http://localhost:8000/predict -H 'Content-Type: application/json' -d @tests/valid.json",
+                        returnStdout: true
+                    ).trim()
+
+                    def parts = result.split("\\n")
+                    def body = parts[0]
+                    def status = parts[1]
+
+                    echo "HTTP Status: ${status}"
+                    echo "Response Body: ${body}"
+
+                    if (status != "200") {
+                        error("Valid request failed with status ${status}")
+                    }
+
+                    if (!body.contains("wine_quality")) {
+                        error("wine_quality field missing in response")
+                    }
+
+                    echo "Valid inference test PASSED"
+                }
+            }
+        }
+
+        // =========================
+        // Stage 5: Send Invalid Request
+        // =========================
+        stage('Send Invalid Request') {
+            steps {
+                script {
+                    echo "Sending invalid inference request..."
+
+                    def status = sh(
+                        script: "curl -s -o invalid_response.txt -w '%{http_code}' -X POST http://localhost:8000/predict -H 'Content-Type: application/json' -d @tests/invalid.json",
+                        returnStdout: true
+                    ).trim()
+
+                    def invalidBody = readFile('invalid_response.txt')
+
+                    echo "HTTP Status: ${status}"
+                    echo "Response Body: ${invalidBody}"
+
+                    if (status == "200") {
+                        error("Invalid request incorrectly returned 200 OK")
+                    }
+
+                    echo "Invalid inference test PASSED"
+                }
+            }
+        }
+
+        // =========================
+        // Stage 6: Stop Container
+        // =========================
+        stage('Stop Container') {
+            steps {
+                echo "Stopping container..."
+                sh '''
+                docker stop $CONTAINER_NAME || true
+                docker rm $CONTAINER_NAME || true
+                '''
+            }
+        }
+    }
+
+    // =========================
+    // Final Result Logging
+    // =========================
+    post {
+        success {
+            echo "PIPELINE SUCCESS — All validations passed"
+        }
+        failure {
+            echo "PIPELINE FAILED — Validation error detected"
+        }
+        always {
+            sh 'docker rm -f $CONTAINER_NAME || true'
+        }
+    }
+}
